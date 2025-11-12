@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "Video URL Finder",
+  "version": "1.0",
+  "description": "DevTools panel that lists video URLs on the page with preview and thumbnails",
+  "permissions": ["clipboardWrite", "tabs", "scripting", "declarativeNetRequest"],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "devtools_page": "devtools.html",
+  "icons": {
+    "128": "icon.png"
+  }
+}
