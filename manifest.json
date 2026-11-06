@@ -3,7 +3,7 @@
   "name": "Video URL Finder",
   "version": "1.0",
   "description": "DevTools panel that lists video URLs on the page with preview and thumbnails",
-  "permissions": ["clipboardWrite", "tabs", "scripting", "declarativeNetRequest"],
+  "permissions": ["clipboardWrite", "downloads", "tabs", "scripting", "declarativeNetRequest"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"

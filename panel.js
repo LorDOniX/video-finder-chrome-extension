@@ -17,9 +17,76 @@ const SCAN_VIDEOS = `Array.from(document.querySelectorAll('video')).flatMap(v =>
 	v.querySelectorAll('source').forEach(s => s.src && srcs.push(s.src));
 		return srcs;
 	}).filter(Boolean)`;
-const urls = new Set();
+const DIRECT_VIDEO_RE = /\.(mp4|webm|mov|mkv|avi|flv|ogv|m4v)$/i;
+const HLS_RE = /\.m3u8$/i;
+
+// url -> 'file' | 'hls'
+const urls = new Map();
 const thumbnailsCache = new Map();
 let filtered = [];
+
+function getVideoType(url) {
+	let pathname;
+
+	try {
+		const parsed = new URL(url);
+
+		if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+			return null;
+		}
+
+		pathname = parsed.pathname;
+	} catch (e) {
+		return null;
+	}
+
+	if (HLS_RE.test(pathname)) {
+		return 'hls';
+	}
+
+	if (DIRECT_VIDEO_RE.test(pathname)) {
+		return 'file';
+	}
+
+	return null;
+}
+
+function createHlsBadge() {
+	const badge = document.createElement('div');
+
+	badge.textContent = 'M3U8';
+	badge.style.width = '120px';
+	badge.style.height = '70px';
+	badge.style.flexShrink = 0;
+	badge.style.background = '#1a2a3a';
+	badge.style.color = '#8cf';
+	badge.style.display = 'flex';
+	badge.style.alignItems = 'center';
+	badge.style.justifyContent = 'center';
+	badge.style.borderRadius = '4px';
+	badge.style.fontWeight = 'bold';
+
+	return badge;
+}
+
+function downloadVideo(url, onDone) {
+	chrome.runtime.sendMessage({ type: 'download', url }, response => {
+		if (chrome.runtime.lastError || !response?.ok) {
+			console.warn('Download failed:', chrome.runtime.lastError?.message || response?.error);
+			onDone(false);
+			return;
+		}
+
+		onDone(true);
+	});
+}
+
+function flashLabel(el, text) {
+	const original = el.textContent;
+
+	el.textContent = text;
+	setTimeout(() => (el.textContent = original), 1200);
+}
 
 // Generate a thumbnail from a video URL
 function generateThumbnail(url) {
@@ -118,7 +185,7 @@ function renderList() {
 	videoList.innerHTML = '';
 
 	const query = searchBox.value.trim().toLowerCase();
-	filtered = Array.from(urls).filter(u => u.toLowerCase().includes(query));
+	filtered = Array.from(urls.keys()).filter(u => u.toLowerCase().includes(query));
 
 	if (filtered.length === 0) {
 		emptyMsg.style.display = 'block';
@@ -128,29 +195,55 @@ function renderList() {
 	}
 
 	filtered.forEach(url => {
+		const type = urls.get(url);
 		const li = document.createElement('li');
 
-		// Thumbnail container
-		const thumbContainer = generateThumbnail(url);
-
-		// URL div (click to copy)
 		const urlDiv = document.createElement('div');
 		urlDiv.className = 'url';
 		urlDiv.textContent = url;
-		urlDiv.onclick = () => copyText(url);
 
-		// Preview button (optional)
-		const btn = document.createElement('button');
-		btn.className = 'preview-btn';
-		btn.textContent = '▶ Preview';
-		btn.onclick = (e) => {
-			e.stopPropagation();
-			showPreview(url);
-		};
+		const actionBtn = document.createElement('button');
+		actionBtn.className = 'preview-btn';
 
-		li.appendChild(thumbContainer);
-		li.appendChild(urlDiv);
-		li.appendChild(btn);
+		if (type === 'hls') {
+			urlDiv.title = 'Click to copy URL';
+			actionBtn.textContent = '📋 Copy';
+
+			const copy = () => {
+				copyText(url);
+				flashLabel(actionBtn, '✅ Copied!');
+			};
+
+			urlDiv.onclick = copy;
+			actionBtn.onclick = copy;
+
+			li.appendChild(createHlsBadge());
+			li.appendChild(urlDiv);
+			li.appendChild(actionBtn);
+		} else {
+			urlDiv.title = 'Click to download';
+			actionBtn.textContent = '💾 Download';
+
+			const download = () => {
+				downloadVideo(url, ok => flashLabel(actionBtn, ok ? '⬇ Started' : '⚠ Failed'));
+			};
+
+			urlDiv.onclick = download;
+			actionBtn.onclick = download;
+
+			const previewBtn = document.createElement('button');
+			previewBtn.className = 'preview-btn';
+			previewBtn.textContent = '▶ Preview';
+			previewBtn.onclick = (e) => {
+				e.stopPropagation();
+				showPreview(url);
+			};
+
+			li.appendChild(generateThumbnail(url));
+			li.appendChild(urlDiv);
+			li.appendChild(actionBtn);
+			li.appendChild(previewBtn);
+		}
 		li.style.display = 'flex';
 		li.style.alignItems = 'center';
 		li.style.gap = '8px';
@@ -175,7 +268,11 @@ previewModal.onclick = (e) => {
 function addVideoUrl(url) {
 	if (!url || urls.has(url)) return;
 
-	urls.add(url);
+	const type = getVideoType(url);
+
+	if (!type) return;
+
+	urls.set(url, type);
 	renderList();
 }
 
@@ -200,9 +297,7 @@ function scanVideos() {
 chrome.devtools.network.onRequestFinished.addListener(request => {
 	const url = request.request.url;
 
-	if (/\.(mp4|webm|m3u8|mov|avi|flv|mkv|mpd|m4s|ts)(\?|$)/i.test(url) || url.startsWith('blob:')) {
-		addVideoUrl(url);
-	}
+	addVideoUrl(url);
 });
 
 // Inject MutationObserver and URL.createObjectURL hook
@@ -267,9 +362,9 @@ copyAllBtn.onclick = () => {
 		return;
 	}
 
-	const all = Array.from(urls).join('\n');
+	const all = Array.from(urls.keys()).join('\n');
 
-	navigator.clipboard.writeText(all);
+	copyText(all);
 	copyAllBtn.textContent = "✅ Copied!";
 	setTimeout(() => (copyAllBtn.textContent = "📋 Copy All"), 1500);
 };
@@ -280,7 +375,7 @@ downloadBtn.onclick = () => {
 		return;
 	}
 
-	const blob = new Blob([Array.from(urls).join('\n')], { type: 'text/plain' });
+	const blob = new Blob([Array.from(urls.keys()).join('\n')], { type: 'text/plain' });
 	const url = URL.createObjectURL(blob);
 	const a = document.createElement('a');
 
