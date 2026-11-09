@@ -29,3 +29,18 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Keep the message channel open for the async response.
   return true;
 });
+
+// Mouse gestures from content script (gestures.js).
+chrome.runtime.onMessage.addListener((msg, sender) => {
+  if (sender.id !== chrome.runtime.id || msg?.type !== 'gesture' || !sender.tab?.id) {
+    return;
+  }
+
+  const tabId = sender.tab.id;
+
+  if (msg.action === 'back') {
+    chrome.tabs.goBack(tabId).catch(() => {});
+  } else if (msg.action === 'forward') {
+    chrome.tabs.goForward(tabId).catch(() => {});
+  }
+});
