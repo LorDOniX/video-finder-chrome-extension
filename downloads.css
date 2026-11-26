@@ -1,0 +1,20 @@
+/* Downloads list of the local download server – shared by panel.html and popup.html. */
+#downloads { flex-shrink:0; max-height:40vh; display:flex; flex-direction:column; border-top:1px solid #444; margin-top:10px; padding-top:6px; }
+#downloads h3 { margin:0 0 6px; font-size:1em; display:flex; align-items:center; gap:8px; }
+#serverStatus { font-weight:normal; font-size:0.85em; color:#999; }
+#serverStatus.online { color:#7c7; }
+#serverStatus.offline { color:#f88; }
+#clearDownloadsBtn { margin-left:auto; font-weight:normal; font-size:0.85em; padding:4px 8px; background:#444; }
+#downloads button:disabled { opacity:0.5; cursor:default; }
+#downloadList { list-style:none; padding:0; margin:0; overflow-y:auto; flex:0 1 auto; min-height:0; }
+#downloadList li { margin:4px 0; padding:6px; background:#2a2a2a; border-radius:4px; display:flex; align-items:center; gap:8px; }
+#downloadList li:hover { background:#3a3a3a; }
+.dl-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:4px; }
+.dl-name { font-weight:bold; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.dl-bar { height:6px; background:#111; border-radius:3px; overflow:hidden; }
+.dl-bar-fill { height:100%; width:0; background:#4a8cd8; transition:width 0.3s; }
+.dl-bar-fill.indeterminate { width:100%; opacity:0.4; }
+.dl-done .dl-bar-fill { background:#4caf50; }
+.dl-error .dl-bar-fill, .dl-canceled .dl-bar-fill { background:#a44; }
+.dl-info { font-size:0.85em; color:#aaa; white-space:pre-wrap; word-break:break-word; }
+.dl-error .dl-info { color:#f88; }

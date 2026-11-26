@@ -2,11 +2,16 @@
   "manifest_version": 3,
   "name": "Video URL Finder",
   "version": "1.0",
-  "description": "DevTools panel that lists video URLs on the page with preview and thumbnails",
+  "description": "DevTools panel that lists video URLs on the page; downloads HLS videos and Google Drive files via a local server",
   "permissions": ["clipboardWrite", "downloads", "tabs", "scripting", "declarativeNetRequest"],
   "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Video Finder – Google Drive download",
+    "default_icon": { "128": "icon.png" }
   },
   "content_scripts": [
     {

@@ -1,7 +1,11 @@
 # Download server
 
-Lokální server pro stahování HLS (m3u8) videí z doplňku. Běží ve WSL, stahuje přes `ffmpeg`
-do Windows složky `Downloads` a doplňku (DevTools panel „Videos“) hlásí průběh.
+Lokální server pro doplněk. Běží ve WSL, stahuje do Windows složky `Downloads` a doplňku hlásí průběh:
+
+- **HLS (m3u8) videa** přes `ffmpeg` – tlačítko „⬇ Download“ v DevTools panelu „Videos“.
+- **Soubory z veřejné složky Google Drive** (vč. podsložek) podle koncovky, např. `.gpx, .gp` –
+  vyskakovací okno po kliku na ikonu doplňku. Složka musí být sdílená „kdokoli s odkazem“; seznam souborů
+  se čte z HTML stránky složky (bez API klíče), viz `drive.js`.
 
 ## Spuštění
 
@@ -28,6 +32,8 @@ Složka pro stažení se zjistí automaticky (`%USERPROFILE%\Downloads` → `/mn
 - `GET /health` – stav serveru
 - `GET /downloads` – seznam stahování (nejnovější první)
 - `POST /downloads` `{ url, title, headers }` – spustí stahování; `headers` (referer, cookie, user-agent, …) se předají ffmpeg
+- `POST /drive` `{ url, extensions }` – najde ve složce Google Drive (i v podsložkách) soubory s danými koncovkami a stáhne je
+- `DELETE /downloads` – vyčistí seznam (odebere dokončená/chybná/zrušená stahování, soubory zůstávají)
 - `DELETE /downloads/:id` – zruší běžící stahování, u dokončeného jen odebere záznam ze seznamu (soubor zůstává)
 
 Požadavky s `Origin` jiné stránky než doplňku server odmítá, aby stahování nemohl spustit libovolný web.

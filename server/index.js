@@ -1,22 +1,24 @@
 #!/usr/bin/env node
 // Local download server for the Video URL Finder extension.
-// Runs in WSL, downloads HLS (m3u8) streams via ffmpeg into the Windows Downloads folder
-// and reports progress back to the DevTools panel over a small JSON API.
+// Runs in WSL, downloads HLS (m3u8) streams via ffmpeg and files from public Google Drive folders
+// into the Windows Downloads folder and reports progress back to the extension over a small JSON API.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import readline from 'node:readline';
-import { spawn, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
+import { downloadHls } from './hls.js';
+import { parseDriveFolderUrl, findDriveFiles, downloadDriveFile } from './drive.js';
 
 const PORT = Number(process.env.PORT) || 9787;
 const HOST = process.env.HOST || '127.0.0.1';
-const FFMPEG = process.env.FFMPEG || 'ffmpeg';
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT) || 3;
 // Optional comma separated list of extension IDs allowed to use the server (default: any extension).
 const ALLOWED_EXTENSION_IDS = (process.env.EXTENSION_IDS || '').split(',').map(s => s.trim()).filter(Boolean);
 // How many finished (done/error/canceled) downloads are kept in the list.
 const MAX_FINISHED = 50;
 const MAX_BODY_SIZE = 1024 * 1024;
+// Max. number of files started by one Google Drive request.
+const MAX_DRIVE_FILES = 100;
 // Request headers the extension may forward to ffmpeg (needed by streams protected by referer/cookies).
 const FORWARDED_HEADERS = ['referer', 'origin', 'cookie', 'authorization', 'accept-language'];
 const ACTIVE_STATUSES = new Set(['queued', 'downloading']);
@@ -24,6 +26,10 @@ const ACTIVE_STATUSES = new Set(['queued', 'downloading']);
 const RESERVED_NAME_RE = /^(con|prn|aux|nul|com\d|lpt\d)$/i;
 // Playlist names that say nothing about the video.
 const GENERIC_NAME_RE = /^(index|master|playlist|manifest|video|stream|chunklist.*|media.*)$/i;
+const RUNNERS = {
+	hls: downloadHls,
+	drive: downloadDriveFile,
+};
 
 const downloadDir = resolveDownloadDir();
 
@@ -66,16 +72,18 @@ function resolveDownloadDir() {
 function publicJob(job) {
 	return {
 		id: job.id,
+		kind: job.kind,
 		url: job.url,
 		title: job.title,
 		fileName: path.basename(job.filePath),
 		filePath: job.filePath,
-		// ffmpeg may need a few seconds to stop (e.g. while blocked on a network read).
+		// Stopping may take a few seconds (e.g. ffmpeg blocked on a network read).
 		status: job.status === 'downloading' && job.cancelRequested ? 'canceling' : job.status,
 		progress: job.progress,
 		durationSec: job.durationSec,
 		downloadedSec: job.downloadedSec,
 		sizeBytes: job.sizeBytes,
+		totalBytes: job.totalBytes,
 		speed: job.speed,
 		error: job.error,
 		createdAt: job.createdAt,
@@ -94,7 +102,14 @@ function sanitizeFileName(name) {
 		.replace(/[. ]+$/, '');
 }
 
-function baseNameFor(title, url) {
+function localTimestamp() {
+	const now = new Date();
+	const pad = n => String(n).padStart(2, '0');
+
+	return `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
+}
+
+function videoBaseName(title, url) {
 	let name = sanitizeFileName(title || '');
 
 	if (!name) {
@@ -110,22 +125,19 @@ function baseNameFor(title, url) {
 		name = sanitizeFileName(segment.replace(/\.m3u8$/i, ''));
 
 		if (!name || GENERIC_NAME_RE.test(name)) {
-			const now = new Date();
-			const pad = n => String(n).padStart(2, '0');
-			const stamp = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${pad(now.getHours())}-${pad(now.getMinutes())}-${pad(now.getSeconds())}`;
-
-			name = `${parsed.hostname} ${stamp}`;
+			name = `${parsed.hostname} ${localTimestamp()}`;
 		}
 	}
 
-	return RESERVED_NAME_RE.test(name) ? `_${name}` : name;
+	return name;
 }
 
-function uniqueFilePath(baseName) {
+function uniqueFilePath(baseName, ext) {
 	const reserved = new Set(Array.from(jobs.values()).filter(j => ACTIVE_STATUSES.has(j.status)).map(j => j.filePath));
+	const base = RESERVED_NAME_RE.test(baseName) ? `_${baseName}` : baseName || 'download';
 
 	for (let i = 1; ; i++) {
-		const fileName = i === 1 ? `${baseName}.mp4` : `${baseName} (${i}).mp4`;
+		const fileName = i === 1 ? `${base}${ext}` : `${base} (${i})${ext}`;
 		const filePath = path.join(downloadDir, fileName);
 
 		if (!reserved.has(filePath) && !fs.existsSync(filePath) && !fs.existsSync(`${filePath}.part`)) {
@@ -157,35 +169,64 @@ function normalizeHeaders(input) {
 	return headers;
 }
 
-function createJob({ url, title, headers }) {
+function createJob(props) {
 	const job = {
 		id: String(nextId++),
-		url,
-		title: typeof title === 'string' ? title.trim().slice(0, 300) : '',
-		headers: normalizeHeaders(headers),
+		kind: 'hls',
+		url: '',
+		title: '',
+		headers: {},
 		filePath: null,
 		status: 'queued',
 		progress: null,
 		durationSec: null,
 		downloadedSec: 0,
 		sizeBytes: 0,
+		totalBytes: null,
 		speed: null,
 		error: null,
 		createdAt: Date.now(),
 		startedAt: null,
 		finishedAt: null,
+		...props,
 		// Internal state, not sent to the client.
-		proc: null,
+		abortController: null,
 		cancelRequested: false,
+		finished: null,
 	};
 
-	job.filePath = uniqueFilePath(baseNameFor(job.title, url));
+	job.finished = new Promise(resolve => (job.resolveFinished = resolve));
 	jobs.set(job.id, job);
 	queue.push(job);
 	pruneFinished();
 	processQueue();
 
 	return job;
+}
+
+function createHlsJob({ url, title, headers }) {
+	const cleanTitle = typeof title === 'string' ? title.trim().slice(0, 300) : '';
+
+	return createJob({
+		kind: 'hls',
+		url,
+		title: cleanTitle,
+		headers: normalizeHeaders(headers),
+		filePath: uniqueFilePath(videoBaseName(cleanTitle, url), '.mp4'),
+	});
+}
+
+function createDriveJob(file) {
+	const ext = path.extname(file.name);
+	const baseName = sanitizeFileName(file.name.slice(0, file.name.length - ext.length));
+
+	return createJob({
+		kind: 'drive',
+		url: `https://drive.google.com/file/d/${file.id}/view`,
+		title: `${file.folderPath}${file.name}`,
+		driveId: file.id,
+		filePath: uniqueFilePath(baseName, sanitizeFileName(ext)),
+	});
 }
 
 function pruneFinished() {
@@ -204,137 +245,44 @@ function processQueue() {
 	}
 }
 
-function parseDuration(text) {
-	const match = /Duration: (\d+):(\d{2}):(\d{2}(?:\.\d+)?)/.exec(text);
-
-	return match ? Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]) : null;
-}
-
-function ffmpegArgs(job) {
-	const partPath = `${job.filePath}.part`;
-	const args = ['-hide_banner', '-nostdin', '-y', '-loglevel', 'info', '-nostats', '-progress', 'pipe:1'];
-	const { 'user-agent': userAgent, ...otherHeaders } = job.headers;
-	const headerLines = Object.entries(otherHeaders).map(([name, value]) => `${name}: ${value}\r\n`).join('');
-
-	if (userAgent) {
-		args.push('-user_agent', userAgent);
-	}
-
-	if (headerLines) {
-		args.push('-headers', headerLines);
-	}
-
-	args.push(
-		'-i', job.url,
-		// Default stream selection picks the best video and audio; subtitles and data (e.g. timed ID3)
-		// can't be copied into mp4, so skip them.
-		'-sn', '-dn',
-		'-c', 'copy',
-		'-f', 'mp4',
-		partPath,
-	);
-
-	return { args, partPath };
-}
-
 function finishJob(job, status, error = null) {
 	job.status = status;
 	job.error = error;
 	job.finishedAt = Date.now();
-	job.proc = null;
+	job.abortController = null;
 	console.log(`[${job.id}] ${status}${error ? `: ${error}` : ''} – ${job.filePath}`);
+	job.resolveFinished();
 	processQueue();
 }
 
-function removeFile(filePath) {
-	fs.promises.unlink(filePath).catch(() => {});
-}
-
-function startJob(job) {
-	const { args, partPath } = ffmpegArgs(job);
-	const stderrTail = [];
+async function startJob(job) {
+	const partPath = `${job.filePath}.part`;
 
 	job.status = 'downloading';
 	job.startedAt = Date.now();
+	job.abortController = new AbortController();
 	console.log(`[${job.id}] downloading ${job.url} -> ${job.filePath}`);
 
-	const proc = spawn(FFMPEG, args, { stdio: ['ignore', 'pipe', 'pipe'] });
-
-	job.proc = proc;
-
-	// -progress writes key=value blocks to stdout.
-	readline.createInterface({ input: proc.stdout }).on('line', line => {
-		const eq = line.indexOf('=');
-
-		if (eq < 0) {
-			return;
-		}
-
-		const key = line.slice(0, eq);
-		const value = line.slice(eq + 1).trim();
-
-		if (key === 'out_time_us' && /^\d+$/.test(value)) {
-			job.downloadedSec = Number(value) / 1e6;
-
-			if (job.durationSec) {
-				job.progress = Math.min(1, job.downloadedSec / job.durationSec);
-			}
-		} else if (key === 'total_size' && /^\d+$/.test(value)) {
-			job.sizeBytes = Number(value);
-		} else if (key === 'speed') {
-			job.speed = value === 'N/A' ? null : value;
-		}
-	});
-
-	readline.createInterface({ input: proc.stderr }).on('line', line => {
-		if (job.durationSec === null) {
-			job.durationSec = parseDuration(line);
-		}
-
-		// Strip the "[hls @ 0x…]" prefix; per-segment "Opening ... for reading" lines are noise for error reporting.
-		const clean = line.replace(/^\[[^\]]* @ 0x[0-9a-f]+\]\s*/i, '').trim();
-
-		if (clean && !/Opening '.*' for reading/.test(clean)) {
-			stderrTail.push(clean);
-
-			if (stderrTail.length > 20) {
-				stderrTail.shift();
-			}
-		}
-	});
-
-	proc.on('error', err => {
-		removeFile(partPath);
-		finishJob(job, 'error', err.code === 'ENOENT' ? `ffmpeg not found (${FFMPEG})` : err.message);
-	});
-
-	proc.on('close', async (code, signal) => {
-		// 'error' event already handled the failure (e.g. ffmpeg missing).
-		if (job.status !== 'downloading') {
-			return;
-		}
+	try {
+		await RUNNERS[job.kind](job, partPath, job.abortController.signal);
 
 		if (job.cancelRequested) {
-			removeFile(partPath);
+			throw new Error('Canceled');
+		}
+
+		await fs.promises.rename(partPath, job.filePath);
+		job.sizeBytes = (await fs.promises.stat(job.filePath)).size;
+		job.progress = 1;
+		finishJob(job, 'done');
+	} catch (e) {
+		await fs.promises.unlink(partPath).catch(() => {});
+
+		if (job.cancelRequested) {
 			finishJob(job, 'canceled');
-			return;
-		}
-
-		if (code !== 0) {
-			removeFile(partPath);
-			finishJob(job, 'error', stderrTail.slice(-3).join('\n') || `ffmpeg exited with ${signal || code}`);
-			return;
-		}
-
-		try {
-			await fs.promises.rename(partPath, job.filePath);
-			job.sizeBytes = (await fs.promises.stat(job.filePath)).size;
-			job.progress = 1;
-			finishJob(job, 'done');
-		} catch (e) {
+		} else {
 			finishJob(job, 'error', e.message);
 		}
-	});
+	}
 }
 
 function cancelJob(job) {
@@ -344,13 +292,9 @@ function cancelJob(job) {
 		return;
 	}
 
-	if (job.status === 'downloading' && job.proc) {
-		const proc = job.proc;
-
+	if (job.status === 'downloading' && !job.cancelRequested) {
 		job.cancelRequested = true;
-		proc.kill('SIGTERM');
-		// ffmpeg may hang on a stalled network read.
-		setTimeout(() => proc.exitCode === null && proc.signalCode === null && proc.kill('SIGKILL'), 5000).unref();
+		job.abortController?.abort();
 	}
 }
 
@@ -413,6 +357,15 @@ function isValidVideoUrl(url) {
 	}
 }
 
+function normalizeExtensions(input) {
+	const list = Array.isArray(input) ? input : String(input || '').split(/[\s,;]+/);
+
+	return Array.from(new Set(list
+		.filter(ext => typeof ext === 'string')
+		.map(ext => ext.trim().toLowerCase().replace(/^\*?\.?/, '.'))
+		.filter(ext => /^\.[\w.-]{1,20}$/.test(ext))));
+}
+
 async function handleRequest(req, res) {
 	const origin = req.headers.origin;
 	const host = (req.headers.host || '').replace(/:\d+$/, '');
@@ -444,6 +397,21 @@ async function handleRequest(req, res) {
 
 	const { pathname } = new URL(req.url, 'http://localhost');
 	const idMatch = /^\/downloads\/([^/]+)$/.exec(pathname);
+	let body = null;
+
+	if (req.method === 'POST') {
+		if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) {
+			sendJson(res, 415, { error: 'Content-Type must be application/json' }, origin);
+			return;
+		}
+
+		try {
+			body = await readJsonBody(req);
+		} catch (e) {
+			sendJson(res, 400, { error: e.message }, origin);
+			return;
+		}
+	}
 
 	if (req.method === 'GET' && pathname === '/health') {
 		sendJson(res, 200, { ok: true, downloadDir }, origin);
@@ -458,28 +426,67 @@ async function handleRequest(req, res) {
 	}
 
 	if (req.method === 'POST' && pathname === '/downloads') {
-		if (!/^application\/json\b/i.test(req.headers['content-type'] || '')) {
-			sendJson(res, 415, { error: 'Content-Type must be application/json' }, origin);
-			return;
-		}
-
-		let body;
-
-		try {
-			body = await readJsonBody(req);
-		} catch (e) {
-			sendJson(res, 400, { error: e.message }, origin);
-			return;
-		}
-
 		if (!isValidVideoUrl(body.url)) {
 			sendJson(res, 400, { error: 'Invalid URL' }, origin);
 			return;
 		}
 
-		const job = createJob(body);
+		const job = createHlsJob(body);
 
 		sendJson(res, 201, { download: publicJob(job) }, origin);
+		return;
+	}
+
+	// Find files with given extensions in a public Google Drive folder (incl. subfolders) and download them.
+	if (req.method === 'POST' && pathname === '/drive') {
+		const folderId = parseDriveFolderUrl(body.url);
+		const extensions = normalizeExtensions(body.extensions);
+
+		if (!folderId) {
+			sendJson(res, 400, { error: 'Not a Google Drive folder URL (https://drive.google.com/drive/folders/…)' }, origin);
+			return;
+		}
+
+		if (extensions.length === 0) {
+			sendJson(res, 400, { error: 'No file extensions given' }, origin);
+			return;
+		}
+
+		let files;
+
+		try {
+			files = await findDriveFiles(folderId, extensions, AbortSignal.timeout(60000));
+		} catch (e) {
+			console.warn(`Drive folder ${folderId}: ${e.message}`);
+			sendJson(res, 502, { error: e.message }, origin);
+			return;
+		}
+
+		if (files.length === 0) {
+			sendJson(res, 404, { error: `No ${extensions.join(', ')} files found in the folder` }, origin);
+			return;
+		}
+
+		if (files.length > MAX_DRIVE_FILES) {
+			sendJson(res, 413, { error: `Too many files (${files.length}), the limit is ${MAX_DRIVE_FILES}` }, origin);
+			return;
+		}
+
+		const downloads = files.map(file => publicJob(createDriveJob(file)));
+
+		sendJson(res, 201, { downloads }, origin);
+		return;
+	}
+
+	// Clear the list – removes finished downloads, running ones stay.
+	if (req.method === 'DELETE' && pathname === '/downloads') {
+		for (const job of jobs.values()) {
+			if (!ACTIVE_STATUSES.has(job.status)) {
+				jobs.delete(job.id);
+			}
+		}
+
+		sendJson(res, 200, { ok: true }, origin);
 		return;
 	}
 
@@ -516,35 +523,22 @@ const server = http.createServer((req, res) => {
 });
 
 server.listen(PORT, HOST, () => {
-	console.log(`Video download server listening on http://${HOST}:${PORT}`);
+	console.log(`Download server listening on http://${HOST}:${PORT}`);
 	console.log(`Downloading to ${downloadDir}`);
 });
 
-function shutdown() {
+async function shutdown() {
 	console.log('Shutting down, canceling running downloads…');
 	server.close();
+	setTimeout(() => process.exit(1), 8000).unref();
 
-	const running = Array.from(jobs.values()).filter(j => j.status === 'downloading' && j.proc);
+	const running = Array.from(jobs.values()).filter(j => j.status === 'downloading');
 
 	queue.length = 0;
-
-	if (running.length === 0) {
-		process.exit(0);
-	}
-
-	let remaining = running.length;
-
-	for (const job of running) {
-		job.proc.once('close', () => {
-			if (--remaining === 0) {
-				// Give the .part cleanup a moment.
-				setTimeout(() => process.exit(0), 200);
-			}
-		});
-		cancelJob(job);
-	}
-
-	setTimeout(() => process.exit(1), 8000).unref();
+	running.forEach(cancelJob);
+	// Wait for the .part files cleanup.
+	await Promise.all(running.map(j => j.finished));
+	process.exit(0);
 }
 
 process.on('SIGINT', shutdown);

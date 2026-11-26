@@ -14,6 +14,10 @@ const FILES = [
 	'panel.html',
 	'panel.js',
 	'gestures.js',
+	'downloads.js',
+	'downloads.css',
+	'popup.html',
+	'popup.js',
 	'icon.png',
 ];
 
