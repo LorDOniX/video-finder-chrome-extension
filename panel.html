@@ -12,6 +12,7 @@
       display: flex;
       flex-direction: column;
       height: 100vh;
+      box-sizing: border-box;
     }
     h2 { margin-top:0; }
     #controls { display:flex; align-items:center; flex-wrap:wrap; gap:6px; margin-bottom:10px; }
@@ -25,6 +26,21 @@
     .preview-btn { background:#444; font-size:0.9em; padding:4px 8px; }
     #previewModal { position:fixed; top:0;left:0;right:0;bottom:0; background:rgba(0,0,0,0.7); display:none; justify-content:center; align-items:center; z-index:1000; }
     #previewModal video { max-width:80%; max-height:80%; border-radius:8px; background:#000; }
+    #downloads { flex-shrink:0; max-height:40vh; display:flex; flex-direction:column; border-top:1px solid #444; margin-top:10px; padding-top:6px; }
+    #downloads h3 { margin:0 0 6px; font-size:1em; display:flex; align-items:center; gap:8px; }
+    #serverStatus { font-weight:normal; font-size:0.85em; color:#999; }
+    #serverStatus.online { color:#7c7; }
+    #serverStatus.offline { color:#f88; }
+    #downloadList { flex:0 1 auto; min-height:0; }
+    .dl-main { flex:1; min-width:0; display:flex; flex-direction:column; gap:4px; }
+    .dl-name { font-weight:bold; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; word-break:normal; }
+    .dl-bar { height:6px; background:#111; border-radius:3px; overflow:hidden; }
+    .dl-bar-fill { height:100%; width:0; background:#4a8cd8; transition:width 0.3s; }
+    .dl-bar-fill.indeterminate { width:100%; opacity:0.4; }
+    .dl-done .dl-bar-fill { background:#4caf50; }
+    .dl-error .dl-bar-fill, .dl-canceled .dl-bar-fill { background:#a44; }
+    .dl-info { font-size:0.85em; color:#aaa; white-space:pre-wrap; }
+    .dl-error .dl-info { color:#f88; }
   </style>
 </head>
 <body>
@@ -37,6 +53,11 @@
   </div>
   <ul id="videoList"></ul>
   <div id="empty" style="display:none;">No videos found</div>
+  <div id="downloads">
+    <h3>Downloads <span id="serverStatus">● checking server…</span></h3>
+    <ul id="downloadList"></ul>
+    <div id="downloadsEmpty" style="display:none;">No downloads</div>
+  </div>
   <div id="previewModal">
     <video id="previewVideo" controls autoplay></video>
   </div>

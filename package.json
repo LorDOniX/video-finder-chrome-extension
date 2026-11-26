@@ -1,0 +1,13 @@
+{
+  "name": "video-finder-chrome-extension",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "server": "node server/index.js",
+    "zip": "node scripts/zip.js"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
