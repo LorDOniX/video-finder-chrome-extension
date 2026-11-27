@@ -76,6 +76,10 @@ function downloadInfo(d) {
 				parts.push(d.speed);
 			}
 
+			if (d.note) {
+				parts.push(d.note);
+			}
+
 			return parts.join(' · ');
 		}
 		case 'done':

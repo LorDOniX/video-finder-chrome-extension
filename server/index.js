@@ -1,13 +1,14 @@
 #!/usr/bin/env node
 // Local download server for the Video URL Finder extension.
-// Runs in WSL, downloads HLS (m3u8) streams via ffmpeg and files from public Google Drive folders
-// into the Windows Downloads folder and reports progress back to the extension over a small JSON API.
+// Runs in WSL, downloads any video via yt-dlp, HLS (m3u8) streams via ffmpeg and files from public
+// Google Drive folders into the Windows Downloads folder and reports progress back to the extension over a small JSON API.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { downloadHls } from './hls.js';
 import { parseDriveFolderUrl, findDriveFiles, downloadDriveFile } from './drive.js';
+import { fetchVideoInfo, videoFileBaseName, downloadYtdlp } from './ytdlp.js';
 
 const PORT = Number(process.env.PORT) || 9787;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -29,6 +30,7 @@ const GENERIC_NAME_RE = /^(index|master|playlist|manifest|video|stream|chunklist
 const RUNNERS = {
 	hls: downloadHls,
 	drive: downloadDriveFile,
+	ytdlp: downloadYtdlp,
 };
 
 const downloadDir = resolveDownloadDir();
@@ -85,6 +87,7 @@ function publicJob(job) {
 		sizeBytes: job.sizeBytes,
 		totalBytes: job.totalBytes,
 		speed: job.speed,
+		note: job.note,
 		error: job.error,
 		createdAt: job.createdAt,
 		startedAt: job.startedAt,
@@ -184,6 +187,7 @@ function createJob(props) {
 		sizeBytes: 0,
 		totalBytes: null,
 		speed: null,
+		note: null,
 		error: null,
 		createdAt: Date.now(),
 		startedAt: null,
@@ -229,6 +233,18 @@ function createDriveJob(file) {
 	});
 }
 
+function createYtdlpJob(url, info) {
+	const ext = typeof info.ext === 'string' && /^\w{1,10}$/.test(info.ext) ? `.${info.ext}` : '.mp4';
+
+	return createJob({
+		kind: 'ytdlp',
+		url: typeof info.webpage_url === 'string' && isValidVideoUrl(info.webpage_url) ? info.webpage_url : url,
+		title: String(info.title || '').slice(0, 300),
+		ytdlpInfo: info,
+		filePath: uniqueFilePath(sanitizeFileName(videoFileBaseName(info)), ext),
+	});
+}
+
 function pruneFinished() {
 	const finished = Array.from(jobs.values()).filter(j => !ACTIVE_STATUSES.has(j.status));
 
@@ -250,6 +266,8 @@ function finishJob(job, status, error = null) {
 	job.error = error;
 	job.finishedAt = Date.now();
 	job.abortController = null;
+	// yt-dlp video info (can be a few MB) isn't needed anymore, e.g. when canceled while queued.
+	job.ytdlpInfo = null;
 	console.log(`[${job.id}] ${status}${error ? `: ${error}` : ''} – ${job.filePath}`);
 	job.resolveFinished();
 	processQueue();
@@ -432,6 +450,29 @@ async function handleRequest(req, res) {
 		}
 
 		const job = createHlsJob(body);
+
+		sendJson(res, 201, { download: publicJob(job) }, origin);
+		return;
+	}
+
+	// Download any video supported by yt-dlp.
+	if (req.method === 'POST' && pathname === '/ytdlp') {
+		if (!isValidVideoUrl(body.url)) {
+			sendJson(res, 400, { error: 'Invalid URL' }, origin);
+			return;
+		}
+
+		let info;
+
+		try {
+			info = await fetchVideoInfo(body.url, AbortSignal.timeout(120000));
+		} catch (e) {
+			console.warn(`yt-dlp ${body.url}: ${e.message}`);
+			sendJson(res, 502, { error: e.message }, origin);
+			return;
+		}
+
+		const job = createYtdlpJob(body.url, info);
 
 		sendJson(res, 201, { download: publicJob(job) }, origin);
 		return;
