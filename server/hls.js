@@ -1,10 +1,14 @@
-// HLS (m3u8) download via ffmpeg.
+// HLS (m3u8) and DASH (mpd) download via ffmpeg.
 import readline from 'node:readline';
 import { spawn } from 'node:child_process';
 
 const FFMPEG = process.env.FFMPEG || 'ffmpeg';
 // ffmpeg may hang on a stalled network read and ignore SIGTERM for a while.
 const KILL_TIMEOUT = 5000;
+// Some CDNs (e.g. ceskatelevize.cz DASH) occasionally never answer a segment request and ffmpeg then waits forever –
+// fail the download when no data arrives for this long.
+const STALL_TIMEOUT = 90000;
+const STALL_CHECK_INTERVAL = 5000;
 
 function parseDuration(text) {
 	const match = /Duration: (\d+):(\d{2}):(\d{2}(?:\.\d+)?)/.exec(text);
@@ -26,7 +30,8 @@ function ffmpegArgs(job, partPath) {
 	}
 
 	args.push(
-		'-i', job.url,
+		// streamUrl – stream found by an extractor, url is then the page URL.
+		'-i', job.streamUrl || job.url,
 		// Default stream selection picks the best video and audio; subtitles and data (e.g. timed ID3)
 		// can't be copied into mp4, so skip them.
 		'-sn', '-dn',
@@ -39,18 +44,27 @@ function ffmpegArgs(job, partPath) {
 }
 
 /**
- * Downloads an HLS stream into partPath (mp4), updates job progress.
+ * Downloads an HLS or DASH stream into partPath (mp4), updates job progress.
  * Resolves on success, rejects on failure or abort.
  */
 export function downloadHls(job, partPath, signal) {
 	return new Promise((resolve, reject) => {
 		const stderrTail = [];
 		const proc = spawn(FFMPEG, ffmpegArgs(job, partPath), { stdio: ['ignore', 'pipe', 'pipe'] });
+		let lastDataAt = Date.now();
+		let stalled = false;
 
-		const onAbort = () => {
+		const stop = () => {
 			proc.kill('SIGTERM');
 			setTimeout(() => proc.exitCode === null && proc.signalCode === null && proc.kill('SIGKILL'), KILL_TIMEOUT).unref();
 		};
+		const onAbort = () => stop();
+		const stallTimer = setInterval(() => {
+			if (!stalled && Date.now() - lastDataAt > STALL_TIMEOUT) {
+				stalled = true;
+				stop();
+			}
+		}, STALL_CHECK_INTERVAL);
 
 		signal.addEventListener('abort', onAbort, { once: true });
 
@@ -66,6 +80,10 @@ export function downloadHls(job, partPath, signal) {
 			const value = line.slice(eq + 1).trim();
 
 			if (key === 'out_time_us' && /^\d+$/.test(value)) {
+				if (Number(value) / 1e6 !== job.downloadedSec) {
+					lastDataAt = Date.now();
+				}
+
 				job.downloadedSec = Number(value) / 1e6;
 
 				if (job.durationSec) {
@@ -99,6 +117,7 @@ export function downloadHls(job, partPath, signal) {
 
 		proc.on('error', err => {
 			settled = true;
+			clearInterval(stallTimer);
 			signal.removeEventListener('abort', onAbort);
 			reject(new Error(err.code === 'ENOENT' ? `ffmpeg not found (${FFMPEG})` : err.message));
 		});
@@ -108,9 +127,12 @@ export function downloadHls(job, partPath, signal) {
 				return;
 			}
 
+			clearInterval(stallTimer);
 			signal.removeEventListener('abort', onAbort);
 
-			if (code === 0 && !signal.aborted) {
+			if (stalled) {
+				reject(new Error(`Stream stalled – no data for ${STALL_TIMEOUT / 1000} s, try again`));
+			} else if (code === 0 && !signal.aborted) {
 				resolve();
 			} else {
 				reject(new Error(stderrTail.slice(-3).join('\n') || `ffmpeg exited with ${exitSignal || code}`));

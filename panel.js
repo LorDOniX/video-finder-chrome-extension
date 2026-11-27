@@ -22,15 +22,30 @@ const SCAN_VIDEOS = `Array.from(document.querySelectorAll('video')).flatMap(v =>
 	}).filter(Boolean)`;
 const DIRECT_VIDEO_RE = /\.(mp4|webm|mov|mkv|avi|flv|ogv|m4v)$/i;
 const HLS_RE = /\.m3u8$/i;
+const DASH_RE = /\.mpd$/i;
+// Stream manifests are often served from URLs without an extension (e.g. ceskatelevize.cz /cdn/uri/get/?token=…),
+// so network responses are recognized by Content-Type too.
+const STREAM_MIME_TYPES = {
+	'application/vnd.apple.mpegurl': 'hls',
+	'application/x-mpegurl': 'hls',
+	'audio/mpegurl': 'hls',
+	'audio/x-mpegurl': 'hls',
+	'application/dash+xml': 'dash',
+};
 
-// url -> 'file' | 'hls'
+// url -> 'file' | 'hls' | 'dash'
 const urls = new Map();
 const thumbnailsCache = new Map();
 // url -> headers of the request that loaded it
 const requestHeaders = new Map();
 let filtered = [];
 
-function getVideoType(url) {
+function isStreamType(type) {
+	return type === 'hls' || type === 'dash';
+}
+
+// mimeType – Content-Type of the response (only known for network requests).
+function getVideoType(url, mimeType = '') {
 	let pathname;
 
 	try {
@@ -45,8 +60,18 @@ function getVideoType(url) {
 		return null;
 	}
 
+	const streamType = STREAM_MIME_TYPES[mimeType.split(';')[0].trim().toLowerCase()];
+
+	if (streamType) {
+		return streamType;
+	}
+
 	if (HLS_RE.test(pathname)) {
 		return 'hls';
+	}
+
+	if (DASH_RE.test(pathname)) {
+		return 'dash';
 	}
 
 	if (DIRECT_VIDEO_RE.test(pathname)) {
@@ -56,10 +81,10 @@ function getVideoType(url) {
 	return null;
 }
 
-function createHlsBadge() {
+function createStreamBadge(type) {
 	const badge = document.createElement('div');
 
-	badge.textContent = 'M3U8';
+	badge.textContent = type === 'dash' ? 'MPD' : 'M3U8';
 	badge.style.width = '120px';
 	badge.style.height = '70px';
 	badge.style.flexShrink = 0;
@@ -210,7 +235,7 @@ function renderList() {
 		const actionBtn = document.createElement('button');
 		actionBtn.className = 'preview-btn';
 
-		if (type === 'hls') {
+		if (isStreamType(type)) {
 			urlDiv.title = 'Click to copy URL';
 			actionBtn.textContent = '📋 Copy';
 
@@ -237,7 +262,7 @@ function renderList() {
 					});
 			};
 
-			li.appendChild(createHlsBadge());
+			li.appendChild(createStreamBadge(type));
 			li.appendChild(urlDiv);
 			li.appendChild(actionBtn);
 			li.appendChild(serverBtn);
@@ -286,10 +311,8 @@ previewModal.onclick = (e) => {
 	}
 };
 
-function addVideoUrl(url) {
+function addVideoUrl(url, type = getVideoType(url)) {
 	if (!url || urls.has(url)) return;
-
-	const type = getVideoType(url);
 
 	if (!type) return;
 
@@ -308,7 +331,7 @@ function scanVideos() {
 		SCAN_VIDEOS,
 		(result, isException) => {
 			if (!isException && result) {
-				result.forEach(addVideoUrl);
+				result.forEach(url => addVideoUrl(url));
 			}
 		}
 	);
@@ -317,12 +340,13 @@ function scanVideos() {
 // Watch network requests for video/MSE content
 chrome.devtools.network.onRequestFinished.addListener(request => {
 	const url = request.request.url;
+	const type = getVideoType(url, request.response?.content?.mimeType || '');
 
-	if (getVideoType(url) === 'hls') {
+	if (isStreamType(type)) {
 		requestHeaders.set(url, pickHeaders(request.request.headers));
 	}
 
-	addVideoUrl(url);
+	addVideoUrl(url, type);
 });
 
 // Inject MutationObserver and URL.createObjectURL hook
@@ -371,7 +395,7 @@ chrome.runtime.onConnect.addListener(port => {
 
 		port.onMessage.addListener(msg => {
 			if (msg.videos) {
-				msg.videos.forEach(addVideoUrl);
+				msg.videos.forEach(url => addVideoUrl(url));
 			}
 		});
 	}

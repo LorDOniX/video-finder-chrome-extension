@@ -5,7 +5,14 @@ Lokální server pro doplněk. Běží ve WSL, stahuje do Windows složky `Downl
 - **Libovolné video přes `yt-dlp`** (YouTube, Vimeo, …) – první sekce vyskakovacího okna po kliku na ikonu
   doplňku (URL se předvyplní z aktuální záložky). Kvalita max. Full HD, jinak nejlepší nižší (720p…),
   preferuje mp4. Název souboru `DATUM NÁZEV.ext` (datum nahrání videa, když chybí, tak dnešní), viz `ytdlp.js`.
-- **HLS (m3u8) videa** přes `ffmpeg` – tlačítko „⬇ Download“ v DevTools panelu „Videos“.
+- **Česká televize** (`ceskatelevize.cz`) – stejný formulář, ale vlastní extraktor (yt-dlp s novým webem ČT nefunguje):
+  IDEC videa se vezme z URL (`/porady/…/282350993581001/`), jinak ze stránky (u stránky pořadu tlačítko „Přehrát“,
+  tj. film / první díl), API přehrávače vrátí HLS stream (do 1080p) a ten stáhne `ffmpeg`. Videa s DRM nepodporuje.
+  Viz `ceskatelevize.js`.
+- **HLS (m3u8) a DASH (mpd) streamy** přes `ffmpeg` – tlačítko „⬇ Download“ v DevTools panelu „Videos“.
+  Panel pozná manifest podle koncovky i podle `Content-Type` odpovědi (adresy jako `/cdn/uri/get/?token=…`),
+  takže najde i streamy za `blob:` videi. Když stream 90 s nepřibývá (CDN občas neodpoví na segment),
+  stahování skončí chybou, aby nevisilo donekonečna.
 - **Soubory z veřejné složky Google Drive** (vč. podsložek) podle koncovky, např. `.gpx, .gp` –
   druhá sekce vyskakovacího okna. Složka musí být sdílená „kdokoli s odkazem“; seznam souborů
   se čte z HTML stránky složky (bez API klíče), viz `drive.js`.
@@ -41,7 +48,8 @@ Složka pro stažení se zjistí automaticky (`%USERPROFILE%\Downloads` → `/mn
 - `GET /health` – stav serveru
 - `GET /downloads` – seznam stahování (nejnovější první)
 - `POST /downloads` `{ url, title, headers }` – spustí stahování; `headers` (referer, cookie, user-agent, …) se předají ffmpeg
-- `POST /ytdlp` `{ url }` – zjistí info o videu (`yt-dlp -J`) a stáhne ho; playlisty nepodporuje
+- `POST /video` `{ url }` – stáhne video ze stránky: `ceskatelevize.cz` vlastním extraktorem, ostatní přes yt-dlp
+  (zjistí info `yt-dlp -J` a stáhne ho); playlisty nepodporuje
 - `POST /drive` `{ url, extensions }` – najde ve složce Google Drive (i v podsložkách) soubory s danými koncovkami a stáhne je
 - `DELETE /downloads` – vyčistí seznam (odebere dokončená/chybná/zrušená stahování, soubory zůstávají)
 - `DELETE /downloads/:id` – zruší běžící stahování, u dokončeného jen odebere záznam ze seznamu (soubor zůstává)

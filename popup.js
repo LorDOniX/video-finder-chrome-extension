@@ -53,7 +53,7 @@ videoForm.onsubmit = async e => {
 	showMessage(videoMessage, 'Fetching video info…');
 
 	try {
-		const { download } = await serverFetch('/ytdlp', {
+		const { download } = await serverFetch('/video', {
 			method: 'POST',
 			body: JSON.stringify({ url }),
 		});

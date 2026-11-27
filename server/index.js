@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Local download server for the Video URL Finder extension.
-// Runs in WSL, downloads any video via yt-dlp, HLS (m3u8) streams via ffmpeg and files from public
-// Google Drive folders into the Windows Downloads folder and reports progress back to the extension over a small JSON API.
+// Runs in WSL, downloads any video via yt-dlp (ceskatelevize.cz via its own extractor), HLS/DASH streams via ffmpeg
+// and files from public Google Drive folders into the Windows Downloads folder and reports progress back to the extension over a small JSON API.
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -9,6 +9,7 @@ import { execFileSync } from 'node:child_process';
 import { downloadHls } from './hls.js';
 import { parseDriveFolderUrl, findDriveFiles, downloadDriveFile } from './drive.js';
 import { fetchVideoInfo, videoFileBaseName, downloadYtdlp } from './ytdlp.js';
+import { isCeskaTelevizeUrl, fetchCeskaTelevizeVideo } from './ceskatelevize.js';
 
 const PORT = Number(process.env.PORT) || 9787;
 const HOST = process.env.HOST || '127.0.0.1';
@@ -125,7 +126,7 @@ function videoBaseName(title, url) {
 			// Keep the raw segment.
 		}
 
-		name = sanitizeFileName(segment.replace(/\.m3u8$/i, ''));
+		name = sanitizeFileName(segment.replace(/\.(m3u8|mpd)$/i, ''));
 
 		if (!name || GENERIC_NAME_RE.test(name)) {
 			name = `${parsed.hostname} ${localTimestamp()}`;
@@ -208,6 +209,7 @@ function createJob(props) {
 	return job;
 }
 
+// HLS or DASH stream downloaded by ffmpeg.
 function createHlsJob({ url, title, headers }) {
 	const cleanTitle = typeof title === 'string' ? title.trim().slice(0, 300) : '';
 
@@ -217,6 +219,20 @@ function createHlsJob({ url, title, headers }) {
 		title: cleanTitle,
 		headers: normalizeHeaders(headers),
 		filePath: uniqueFilePath(videoBaseName(cleanTitle, url), '.mp4'),
+	});
+}
+
+// Video from ceskatelevize.cz (HLS stream found via the player API).
+function createCeskaTelevizeJob(pageUrl, video) {
+	const title = video.title.slice(0, 300);
+
+	return createJob({
+		kind: 'hls',
+		url: pageUrl,
+		streamUrl: video.url,
+		title,
+		durationSec: video.durationSec,
+		filePath: uniqueFilePath(sanitizeFileName(videoFileBaseName({ title })), '.mp4'),
 	});
 }
 
@@ -455,10 +471,27 @@ async function handleRequest(req, res) {
 		return;
 	}
 
-	// Download any video supported by yt-dlp.
-	if (req.method === 'POST' && pathname === '/ytdlp') {
+	// Download a video from a web page – ceskatelevize.cz via its own extractor, anything else via yt-dlp.
+	if (req.method === 'POST' && pathname === '/video') {
 		if (!isValidVideoUrl(body.url)) {
 			sendJson(res, 400, { error: 'Invalid URL' }, origin);
+			return;
+		}
+
+		if (isCeskaTelevizeUrl(body.url)) {
+			let video;
+
+			try {
+				video = await fetchCeskaTelevizeVideo(body.url, AbortSignal.timeout(30000));
+			} catch (e) {
+				console.warn(`ČT ${body.url}: ${e.message}`);
+				sendJson(res, 502, { error: e.message }, origin);
+				return;
+			}
+
+			const job = createCeskaTelevizeJob(body.url, video);
+
+			sendJson(res, 201, { download: publicJob(job) }, origin);
 			return;
 		}
 
